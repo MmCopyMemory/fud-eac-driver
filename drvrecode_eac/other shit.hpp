@@ -279,45 +279,52 @@ namespace pml
 	}
 
 }
+struct cache {
+	uintptr_t Address;
+	MMPTE Value;
+};
+static cache cached_pml4e[512];
+static cache cached_pdpte[512];
+static cache cached_pde[512];
+static cache cached_pte[512];
 auto translate_linear(
 	UINT64 directory_base,
 	UINT64 address) -> UINT64 {
-	directory_base &= ~0xf;
+	_virt_addr_t virtual_address{};
+	virtual_address.value = PVOID(address);
+	SIZE_T Size = 0;
 
-	auto virt_addr = address & ~(~0ul << 12);
-	auto pte = ((address >> 12) & (0x1ffll));
-	auto pt = ((address >> 21) & (0x1ffll));
-	auto pd = ((address >> 30) & (0x1ffll));
-	auto pdp = ((address >> 39) & (0x1ffll));
-	auto p_mask = ((~0xfull << 8) & 0xfffffffffull);
-	size_t readsize = 0;
-	UINT64 pdpe = 0;
-	read_physical(PVOID(directory_base + 8 * pdp), &pdpe, sizeof(pdpe), &readsize);
-	if (~pdpe & 1) {
+	if (cached_pml4e[virtual_address.pml4_index].Address != directory_base + 8 * virtual_address.pml4_index || !cached_pml4e[virtual_address.pml4_index].Value.u.Hard.Valid) {
+		cached_pml4e[virtual_address.pml4_index].Address = directory_base + 8 * virtual_address.pml4_index;
+		Physical::ReadPhysical(PVOID(cached_pml4e[virtual_address.pml4_index].Address), reinterpret_cast<PVOID>(&cached_pml4e[virtual_address.pml4_index].Value), 8, &Size);
+	}
+	if (!cached_pml4e[virtual_address.pml4_index].Value.u.Hard.Valid)
 		return 0;
+
+	if (cached_pdpte[virtual_address.pdpt_index].Address != (cached_pml4e[virtual_address.pml4_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pdpt_index || !cached_pdpte[virtual_address.pdpt_index].Value.u.Hard.Valid) {
+		cached_pdpte[virtual_address.pdpt_index].Address = (cached_pml4e[virtual_address.pml4_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pdpt_index;
+		Physical::ReadPhysical(PVOID(cached_pdpte[virtual_address.pdpt_index].Address), reinterpret_cast<PVOID>(&cached_pdpte[virtual_address.pdpt_index].Value), 8, &Size);
 	}
-	UINT64 pde = 0;
-	read_physical(PVOID((pdpe & p_mask) + 8 * pd), &pde, sizeof(pde), &readsize);
-	if (~pde & 1) {
+
+	if (!cached_pdpte[virtual_address.pdpt_index].Value.u.Hard.Valid)
 		return 0;
+
+	if (cached_pde[virtual_address.pd_index].Address != (cached_pdpte[virtual_address.pdpt_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pd_index || !cached_pde[virtual_address.pd_index].Value.u.Hard.Valid) {
+		cached_pde[virtual_address.pd_index].Address = (cached_pdpte[virtual_address.pdpt_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pd_index;
+		Physical::ReadPhysical(PVOID(cached_pde[virtual_address.pd_index].Address), reinterpret_cast<PVOID>(&cached_pde[virtual_address.pd_index].Value), 8, &Size);
 	}
-	if (pde & 0x80)
-		return (pde & (~0ull << 42 >> 12)) + (address & ~(~0ull << 30));
-	UINT64 pteAddr = 0;
-	read_physical(PVOID((pde & p_mask) + 8 * pt), &pteAddr, sizeof(pteAddr), &readsize);
-	if (~pteAddr & 1) {
+	if (!cached_pde[virtual_address.pd_index].Value.u.Hard.Valid)
 		return 0;
+
+	if (cached_pte[virtual_address.pt_index].Address != (cached_pde[virtual_address.pd_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pt_index || !cached_pte[virtual_address.pt_index].Value.u.Hard.Valid) {
+		cached_pte[virtual_address.pt_index].Address = (cached_pde[virtual_address.pd_index].Value.u.Hard.PageFrameNumber << 12) + 8 * virtual_address.pt_index;
+		Physical::ReadPhysical(PVOID(cached_pte[virtual_address.pt_index].Address), reinterpret_cast<PVOID>(&cached_pte[virtual_address.pt_index].Value), 8, &Size);
 	}
-	if (pteAddr & 0x80) {
-		return (pteAddr & p_mask) + (address & ~(~0ull << 21));
-	}
-	address = 0;
-	read_physical(PVOID((pteAddr & p_mask) + 8 * pte), &address, sizeof(address), &readsize);
-	address &= p_mask;
-	if (!address) {
+
+	if (!cached_pte[virtual_address.pt_index].Value.u.Hard.Valid)
 		return 0;
-	}
-	return address + virt_addr;
+
+	return (cached_pte[virtual_address.pt_index].Value.u.Hard.PageFrameNumber << 12) + virtual_address.offset;
 }
 NTSTATUS FKX99(prw x)
 {
